@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.python-version
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+
+# Project specific
+old/
+
+# Environment
+.env
+venv/
+.venv/
+.envrc
+
+# IDE
+.vscode/
+.idea/
+
+# Testing
+.coverage*
+coverage.xml
+htmlcov/
+
+# Databases
+*.sqlite3
+*.db
+
+# Logs and backups
+*.log
+*.bak
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.swp
+*.swo
