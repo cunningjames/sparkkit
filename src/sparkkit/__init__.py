@@ -2,6 +2,16 @@
 SparkKit: A dplyr-inspired interface for PySpark
 """
 
+import sys
+import warnings
+
+if sys.version_info >= (3, 12):
+    warnings.warn(
+        "Python 3.12 is not officially supported by SparkKit as PySpark does not "
+        "support this version yet. Some functionalities may not work as expected.",
+        DeprecationWarning,
+    )
+
 from .core import (
     # Core DataFrame operations
     ChainableDF,
