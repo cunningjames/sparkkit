@@ -98,6 +98,20 @@ def test_select_with_selector(chainable_df):
     assert result.df.columns == ["group", "value"]
 
 
+def test_select_rename(chainable_df):
+    """Test select with rename argument to rename columns"""
+    result = chainable_df >> select("id", "value", renamed_value="value")
+
+    assert "id" in result.df.columns
+    assert "renamed_value" in result.df.columns
+    assert "value" in result.df.columns
+
+    rows = result.df.collect()
+    for row in rows:
+        assert hasattr(row, "renamed_value")
+        assert row.renamed_value == row.value
+
+
 def test_where_filter(chainable_df):
     """Test where filtering operation"""
     result = chainable_df >> where("value > 20")
@@ -312,6 +326,7 @@ def time_series_data(spark):
     right_df = spark.createDataFrame(right_data, ["id", "timestamp", "label"])
     return left_df, right_df
 
+
 @pytest.fixture
 def time_series_resample_data(spark):
     """Create time series data for resampling tests"""
@@ -354,40 +369,43 @@ def test_as_of_join_basic(time_series_data):
 def test_resample_basic(time_series_resample_data):
     """Test basic resampling functionality"""
     chain = ChainableDF(time_series_resample_data)
-    
+
     result = chain >> resample("timestamp", "15min")
-    
+
     # Verify window column was added
     assert "_window" in result.df.columns
-    
+
     # Verify group_cols is set correctly
     assert result.group_cols == ["_window"]
-    
+
     # Verify window start times
     windows = result.df.select("_window.start").distinct().collect()
     expected_starts = [
         "2023-01-01 10:00:00",
         "2023-01-01 10:15:00",
-        "2023-01-01 10:30:00"
+        "2023-01-01 10:30:00",
     ]
     assert sorted([str(w.start) for w in windows]) == sorted(expected_starts)
+
 
 def test_resample_column_input(time_series_resample_data):
     """Test resample with Column input for date_col"""
     chain = ChainableDF(time_series_resample_data)
-    
+
     result = chain >> resample(f.col("timestamp"), "15min")
-    
+
     # Verify window column was added
     assert "_window" in result.df.columns
     assert result.group_cols == ["_window"]
 
+
 def test_resample_invalid_frequency(time_series_resample_data):
     """Test resample with invalid frequency string"""
     chain = ChainableDF(time_series_resample_data)
-    
+
     with pytest.raises(ValueError):
         chain >> resample("timestamp", "15 bananas")
+
 
 def test_as_of_join_different_time_columns(time_series_data):
     """Test as-of join with different time columns"""
@@ -427,6 +445,7 @@ def test_parse_freq_invalid_unit():
     with pytest.raises(ValueError):
         parse_freq("10x")
 
+
 def test_left_join(chainable_df, spark):
     """Test left join operation"""
     other_data = [
@@ -440,6 +459,7 @@ def test_left_join(chainable_df, spark):
     rows = result.df.collect()
     assert len(rows) == 4  # All left DataFrame rows
     assert all(hasattr(row, "letter") for row in rows)
+
 
 def test_right_join(chainable_df, spark):
     """Test right join operation"""
@@ -455,6 +475,7 @@ def test_right_join(chainable_df, spark):
     assert len(rows) == 2  # Only matching right DataFrame rows
     assert all(hasattr(row, "group") for row in rows)
 
+
 def test_full_join(chainable_df, spark):
     """Test full join operation"""
     other_data = [
@@ -469,6 +490,7 @@ def test_full_join(chainable_df, spark):
     assert len(rows) == 4  # Union of both DataFrames
     # Additional assertions can be added as needed
 
+
 def test_semi_join(chainable_df, spark):
     """Test semi join operation"""
     other_data = [
@@ -481,6 +503,7 @@ def test_semi_join(chainable_df, spark):
 
     rows = result.df.collect()
     assert len(rows) == 2  # Only matching left DataFrame rows
+
 
 def test_anti_join(chainable_df, spark):
     """Test anti join operation"""
@@ -495,6 +518,7 @@ def test_anti_join(chainable_df, spark):
     rows = result.df.collect()
     assert len(rows) == 2  # Non-matching left DataFrame rows
 
+
 def test_cross_join(chainable_df, spark):
     """Test cross join operation"""
     other_data = [
@@ -507,6 +531,7 @@ def test_cross_join(chainable_df, spark):
 
     rows = result.df.collect()
     assert len(rows) == 8  # Cartesian product of both DataFrames
+
 
 def test_join_overlapping_columns(chainable_df, spark):
     """Test join operation with overlapping non-key columns"""
@@ -546,3 +571,57 @@ def test_join_overlapping_columns(chainable_df, spark):
     assert joined_row.group_y == "A_right"
     assert joined_row.extra == 100
 
+
+def test_with_columns_varargs(chainable_df):
+    """Test with_columns by passing Column objects as varargs"""
+    new_column1 = f.lit(100).alias("new_col1")
+    new_column2 = (f.col("value") + 50).alias("new_col2")
+    result = chainable_df >> with_columns(new_column1, new_column2)
+
+    assert "new_col1" in result.df.columns
+    assert "new_col2" in result.df.columns
+
+    rows = result.df.collect()
+    for row in rows:
+        assert row.new_col1 == 100
+        assert row.new_col2 == row.value + 50
+
+
+def test_with_columns_varargs_no_alias(chainable_df):
+    """Test with_columns by passing Column objects without aliases should raise
+    ValueError
+    """
+    new_column1 = f.lit(100)  # No alias
+    new_column2 = f.col("value") + 50  # No alias
+
+    with pytest.raises(ValueError):
+        chainable_df >> with_columns(new_column1, new_column2)
+
+
+def test_with_columns_batch(chainable_df):
+    """Test with_columns by adding multiple columns with batch=True"""
+    new_column1 = f.lit(200).alias("batch_col1")
+    new_column2 = (f.col("value") * 3).alias("batch_col2")
+    result = chainable_df >> with_columns(new_column1, new_column2, batch=True)
+
+    assert "batch_col1" in result.df.columns
+    assert "batch_col2" in result.df.columns
+
+    rows = result.df.collect()
+    for row in rows:
+        assert row.batch_col1 == 200
+        assert row.batch_col2 == row.value * 3
+
+
+def test_summarize_without_group_by(chainable_df):
+    """Test summarize when group_by was not called"""
+    result = chainable_df >> summarize(
+        total_count=f.count("*"),
+        average_value=f.avg("value")
+    )
+
+    assert result.df.count() == 1
+
+    row = result.df.collect()[0]
+    assert row.total_count == 4  # Assuming sample_df has 4 rows
+    assert row.average_value == 25.0  # (10 + 20 + 30 + 40) / 4

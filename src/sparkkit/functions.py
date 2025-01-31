@@ -119,10 +119,8 @@ def where(condition: str | Column) -> Callable:
     """
 
     def _where(chain: ChainableDF) -> ChainableDF:
-        if isinstance(condition, Column):
-            filtered_df = chain.df.filter(condition)
-        else:
-            filtered_df = chain.df.filter(condition)
+        filtered_df = chain.df.filter(condition)
+
         return ChainableDF(filtered_df, group_cols=chain.group_cols)
 
     return _where
