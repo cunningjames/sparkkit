@@ -6,7 +6,6 @@ from typing import Callable
 import pyspark.sql.functions as f
 from pyspark.sql import DataFrame
 from pyspark.sql.column import Column
-from pyspark.sql.functions import col, expr
 from pyspark.sql.window import Window
 
 from .core import ChainableDF
@@ -51,9 +50,9 @@ def as_of_join(
     by: str | list[str],
     time_col_left: str,
     time_col_right: str | None = None,
-    suffix: tuple[str, str] = ("_x", "_y"),
+    suffix: tuple[str, str] | None = None,
     inclusive: bool = True,
-) -> Callable:
+) -> Callable[[ChainableDF], ChainableDF]:
     """
     Perform an as-of join between two DataFrames based on timing conditions.
 
@@ -72,17 +71,20 @@ def as_of_join(
         time_col_left (str): Time column from the left (calling) DataFrame.
         time_col_right (str | None, optional): Time column from the right (`other`) 
             DataFrame. If not provided, `time_col_left` is used. Defaults to None.
-        suffix (tuple[str, str], optional): Suffixes to append to overlapping column 
-            names from the left and right DataFrames, respectively. Defaults to ("_x", 
-            "_y").
+        suffix (tuple[str, str] | None, optional): Suffixes to append to overlapping column 
+            names from the left and right DataFrames, respectively. If None, no suffixes 
+            will be added to overlapping columns. Defaults to None; this means that if
+            only time_col_left is provided, the default ("_x", "_y") suffixes will be used,
+            while if both time_col_left and time_col_right are provided, no suffixes will
+            be added.
         inclusive (bool, optional): Determines the join condition. If True, includes 
             rows where `other.time_col_right` <= `left.time_col_left`. If False, only 
             includes rows where `other.time_col_right` < `left.time_col_left`. Defaults 
             to True.
 
     Returns:
-        Callable: A function that takes a `ChainableDF` and returns a joined 
-            `ChainableDF` after performing the as-of join.
+        Callable[[ChainableDF], ChainableDF]: A function that takes a `ChainableDF` and 
+            returns a joined `ChainableDF` after performing the as-of join.
 
     Examples:
         >>> from sparkkit.core import ChainableDF, as_of_join
@@ -104,73 +106,80 @@ def as_of_join(
         ...     suffix=("_left", "_right"),
         ...     inclusive=False
         ... )
+
+        >>> # Using no suffix
+        >>> result = chain_left >> as_of_join(
+        ...     chain_right,
+        ...     by="id",
+        ...     time_col_left="timestamp",
+        ...     suffix=None
+        ... )
     """
+
+    if time_col_right is None or time_col_left == time_col_right:
+        if suffix is None:
+            suffix = ("_x", "_y")
+
     def _as_of_join(chain: ChainableDF) -> ChainableDF:
         right_df = other.df if isinstance(other, ChainableDF) else other
         left_df = chain.df
 
         effective_time_col_right = time_col_right or time_col_left
+        time_cols = (time_col_left, effective_time_col_right)
+        
+        # Rename conflicting columns
+        if suffix is not None:
+            right_cols = {c: f"{c}{suffix[1]}" 
+                         for c in right_df.columns 
+                         if c in left_df.columns and c not in {by, effective_time_col_right}}
+            
+            right_renamed = right_df.select(
+                [f.col(c).alias(right_cols.get(c, c)) for c in right_df.columns]
+            )
+            
+            # Adjust right time column if names match
+            if time_col_left == effective_time_col_right:
+                right_renamed = right_renamed.withColumnRenamed(
+                    effective_time_col_right, 
+                    f"{effective_time_col_right}{suffix[1]}"
+                )
+                effective_time_col_right = f"{effective_time_col_right}{suffix[1]}"
+        else:
+            right_renamed = right_df
 
-        partition_cols = [by] if isinstance(by, str) else by
-
-        left_alias = "l"
-        right_alias = "r"
-
-        joined = left_df.alias(left_alias).join(
-            right_df.alias(right_alias),
-            on=partition_cols,
-            how="left",
-        )
-
+        # Perform filtered join
         op = "<=" if inclusive else "<"
-        condition = expr(
-            f"{right_alias}.{effective_time_col_right} {op} {left_alias}.{time_col_left}"
+        joined = left_df.alias("left").join(
+            right_renamed.alias("right"),
+            (f.col(f"left.{by}") == f.col(f"right.{by}")) &
+            (f.col(f"right.{effective_time_col_right}") <= f.col(f"left.{time_col_left}")),
+            "left"
         )
-        filtered = joined.filter(condition)
 
-        window_spec = Window.partitionBy(
-            [col(f"{left_alias}.{c}") for c in partition_cols]
-        ).orderBy(col(f"{right_alias}.{effective_time_col_right}").desc())
-
-        filtered_with_rn = filtered.withColumn(
-            "rn_asof", f.row_number().over(window_spec)
+        # Add ranking for nearest timestamp
+        window = Window.partitionBy(f"left.{by}", f"left.{time_col_left}").orderBy(
+            f.col(f"right.{effective_time_col_right}").desc()
         )
-        picked = filtered_with_rn.filter("rn_asof = 1").drop("rn_asof")
-
-        overlap = set(left_df.columns).intersection(set(right_df.columns))
-        overlap -= set(partition_cols)
-
-        overlap -= {time_col_left}
-        if time_col_right and time_col_right in overlap:
-            overlap -= {time_col_right}
-
-        new_df = picked
-        for col_name in overlap:
-            new_df = new_df.withColumnRenamed(
-                f"{right_alias}.{col_name}", f"{col_name}{suffix[1]}"
-            )
-
-        if time_col_right and time_col_right != time_col_left:
-            new_df = new_df.withColumnRenamed(
-                f"{right_alias}.{time_col_right}", f"{time_col_right}{suffix[1]}"
-            )
-
-        for c in left_df.columns:
-            old_name = f"{left_alias}.{c}"
-            if old_name in new_df.columns:
-                new_df = new_df.withColumnRenamed(old_name, c)
-
-        for c in right_df.columns:
-            old_name = f"{right_alias}.{c}"
-            if old_name in new_df.columns:
-                new_name = f"{c}{suffix[1]}" if c not in partition_cols else c
-                new_df = new_df.withColumnRenamed(old_name, new_name)
-
-        other_groups = other.group_cols if isinstance(other, ChainableDF) else []
-        combined_groups = list(set(chain.group_cols + other_groups))
-        return ChainableDF(new_df, group_cols=combined_groups)
+        
+        ranked = joined.withColumn("_rank", f.rank().over(window)).filter(f.col("_rank") == 1)
+        
+        # Clean up columns
+        final_cols = []
+        for c in ranked.columns:
+            if c.startswith("_"):
+                continue
+                
+            if c in left_df.columns:
+                col_name = c + (suffix[0] if suffix and c == time_col_left else "")
+                final_cols.append(f.col("left.`{}`".format(c)).alias(col_name))
+            else:
+                final_cols.append(f.col("right.`{}`".format(c)))
+        
+        result_df = ranked.select(*final_cols).drop(f"right.{by}")
+        return ChainableDF(result_df)
 
     return _as_of_join
+
 
 
 def parse_freq(freq: str) -> str:
