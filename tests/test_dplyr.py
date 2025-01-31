@@ -1,20 +1,25 @@
+import os
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 from delta import configure_spark_with_delta_pip
-from pyspark.sql import SparkSession, functions as f
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as f
+from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
-from sparkkit import inner_join, otherwise
-from sparkkit.time_series import as_of_join, resample, parse_freq
-
-from sparkkit.core import (
-    ChainableDF,
-    contains,
-    starts_with,
+from sparkkit import (
+    anti_join,
+    cross_join,
+    full_join,
+    inner_join,
+    left_join,
+    otherwise,
+    right_join,
+    semi_join,
 )
-
+from sparkkit.core import ChainableDF, contains, starts_with
 from sparkkit.functions import (
     case_when,
     distinct,
@@ -30,10 +35,7 @@ from sparkkit.functions import (
     where,
     with_columns,
 )
-
-import os
-import sys
-
+from sparkkit.time_series import as_of_join, parse_freq, resample
 
 if os.name == "nt":
     os.environ["PYSPARK_PYTHON"] = sys.executable
@@ -424,3 +426,123 @@ def test_parse_freq_invalid_unit():
     """Test parse_freq raises ValueError on invalid unit"""
     with pytest.raises(ValueError):
         parse_freq("10x")
+
+def test_left_join(chainable_df, spark):
+    """Test left join operation"""
+    other_data = [
+        (1, "X"),
+        (3, "Y"),
+    ]
+    other_df = spark.createDataFrame(other_data, ["id", "letter"])
+
+    result = chainable_df >> left_join(other_df, by="id")
+
+    rows = result.df.collect()
+    assert len(rows) == 4  # All left DataFrame rows
+    assert all(hasattr(row, "letter") for row in rows)
+
+def test_right_join(chainable_df, spark):
+    """Test right join operation"""
+    other_data = [
+        (1, "X"),
+        (3, "Y"),
+    ]
+    other_df = spark.createDataFrame(other_data, ["id", "letter"])
+
+    result = chainable_df >> right_join(other_df, by="id")
+
+    rows = result.df.collect()
+    assert len(rows) == 2  # Only matching right DataFrame rows
+    assert all(hasattr(row, "group") for row in rows)
+
+def test_full_join(chainable_df, spark):
+    """Test full join operation"""
+    other_data = [
+        (1, "X"),
+        (3, "Y"),
+    ]
+    other_df = spark.createDataFrame(other_data, ["id", "letter"])
+
+    result = chainable_df >> full_join(other_df, by="id")
+
+    rows = result.df.collect()
+    assert len(rows) == 4  # Union of both DataFrames
+    # Additional assertions can be added as needed
+
+def test_semi_join(chainable_df, spark):
+    """Test semi join operation"""
+    other_data = [
+        (1, "X"),
+        (3, "Y"),
+    ]
+    other_df = spark.createDataFrame(other_data, ["id", "letter"])
+
+    result = chainable_df >> semi_join(other_df, by="id")
+
+    rows = result.df.collect()
+    assert len(rows) == 2  # Only matching left DataFrame rows
+
+def test_anti_join(chainable_df, spark):
+    """Test anti join operation"""
+    other_data = [
+        (1, "X"),
+        (3, "Y"),
+    ]
+    other_df = spark.createDataFrame(other_data, ["id", "letter"])
+
+    result = chainable_df >> anti_join(other_df, by="id")
+
+    rows = result.df.collect()
+    assert len(rows) == 2  # Non-matching left DataFrame rows
+
+def test_cross_join(chainable_df, spark):
+    """Test cross join operation"""
+    other_data = [
+        (100,),
+        (200,),
+    ]
+    other_df = spark.createDataFrame(other_data, ["extra"])
+
+    result = chainable_df >> cross_join(other_df)
+
+    rows = result.df.collect()
+    assert len(rows) == 8  # Cartesian product of both DataFrames
+
+def test_join_overlapping_columns(chainable_df, spark):
+    """Test join operation with overlapping non-key columns"""
+    # Create left DataFrame with overlapping column 'group'
+    left_data = [
+        (1, "A_left", 10),
+        (2, "B_left", 20),
+    ]
+    left_df = spark.createDataFrame(left_data, ["id", "group", "value"])
+
+    # Create right DataFrame with overlapping column 'group'
+    right_data = [
+        (1, "A_right", 100),
+        (3, "C_right", 300),
+    ]
+    right_df = spark.createDataFrame(right_data, ["id", "group", "extra"])
+
+    # Create ChainableDF instance for left DataFrame
+    chain = ChainableDF(left_df)
+
+    # Perform inner join on 'id'
+    result = chain >> inner_join(right_df, by="id")
+
+    # Collect results
+    rows = result.df.collect()
+
+    # Verify the number of joined rows
+    assert len(rows) == 1  # Only matching 'id' == 1
+
+    # Verify that overlapping 'group' column from right_df is renamed
+    assert "group_x" in result.df.columns
+    assert "group_y" in result.df.columns
+
+    # Verify the values of the renamed columns
+    joined_row = rows[0]
+    assert joined_row.group_x == "A_left"
+    assert joined_row.group_y == "A_right"
+    assert joined_row.extra == 100
+
